@@ -1,0 +1,817 @@
+---
+title: "SSF_pipeline"
+output: html_document
+date: "2026-11-10"
+---
+
+READ ME:
+A lot of this is inspired by the amt code: https://onlinelibrary.wiley.com/doi/full/10.1002/ece3.4823
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/saramarolt/Desktop/PhD/TrackingData")
+```
+
+I want to set up a pipeline for SSF
+I will do by first looking at the Rödbena HQC9972
+
+First i need to clean the whole track:
+```{r}
+gps <- read_csv("MigrationTracks/Rödbena/HQC9972.csv")
+  gps <-gps |>
+    rename(timestamp = `Pick Time`,
+           track_id  = `Device Name`) |>
+    filter(!is.na(Longitude), !is.na(Latitude)) |>
+    mutate(timestamp = as.POSIXct(timestamp, tz = "UTC")) |>
+    filter(!is.na(timestamp)) |>
+    arrange(timestamp)
+```
+I will clean the track 
+```{r}
+gps_clean_full <- gps %>%
+  mutate(
+    timestamp = as.POSIXct(timestamp, tz = "UTC"),
+    longitude = as.numeric(Longitude),
+    latitude = as.numeric(Latitude)
+  ) %>%
+  filter(
+    !is.na(track_id),
+    !is.na(timestamp),
+    !is.na(longitude),
+    !is.na(latitude),
+    between(longitude, -180, 180),
+    between(latitude, -90, 90)
+  ) %>%
+  arrange(track_id, timestamp) %>%
+  distinct(track_id, timestamp, .keep_all = TRUE)
+```
+
+I then want to use the full track to make my distributions for my angles and step lengths 
+```{r}
+library(amt); library(dplyr); library(purrr); library(tidyr); library(lubridate)
+
+trk_full <- make_track(gps_clean_full,
+                       .x = longitude, .y = latitude, .t = timestamp,
+                       id = track_id, crs = 4326, all_cols = TRUE)
+
+stp_full <- trk_full |>
+  nest(data = -track_id) |>
+  mutate(steps = map(data, \(d) d |>
+           track_resample(rate = hours(1), tolerance = minutes(10)) |>
+           filter_min_n_burst(3) |>
+           steps_by_burst())) |>
+  select(track_id, steps) |>
+  unnest(steps)
+
+sl_all <- fit_distr(stp_full$sl_, "gamma")
+ta_all <- fit_distr(stp_full$ta_[is.finite(stp_full$ta_)], "vonmises")
+sl_all$params; ta_all$params
+```
+
+First I want to check and clean the data to see its good
+So what is the fix rate for my data
+
+
+```{r}
+gps_sub <- gps |>
+  filter(timestamp >= as.POSIXct("2026-07-12 00:00:00", tz = "UTC"),
+         timestamp <  as.POSIXct("2026-07-15 00:00:00", tz = "UTC"))
+```
+
+
+```{r}
+gps_clean <- gps_sub %>%
+  mutate(
+    timestamp = as.POSIXct(timestamp, tz = "UTC"),
+    longitude = as.numeric(Longitude),
+    latitude = as.numeric(Latitude)
+  ) %>%
+  filter(
+    !is.na(track_id),
+    !is.na(timestamp),
+    !is.na(longitude),
+    !is.na(latitude),
+    between(longitude, -180, 180),
+    between(latitude, -90, 90)
+  ) %>%
+  arrange(track_id, timestamp) %>%
+  distinct(track_id, timestamp, .keep_all = TRUE)
+```
+
+I will then create a track using amt
+```{r}
+library(amt)
+trk <- make_track(
+  gps_clean,
+  .x = longitude,
+  .y = latitude,
+  .t = timestamp,
+  id = id,
+  crs = 4326,
+  all_cols = TRUE,
+  check_duplicates = TRUE
+)
+```
+
+Then to see sampling rate:
+```{r}
+amt::summarize_sampling_rate(trk)
+```
+
+
+
+Then i want to resample to make sure I get a fix every hour with a 10 minute tolerance
+I also want to do linear interpolation between the fixes to make sure i have a fix every hour 
+
+```{r}
+
+library(dplyr)
+library(tibble)
+library(amt)
+
+trk_hourly <- track_resample(
+trk,
+rate = hours(1),
+tolerance = minutes(10)
+)
+
+trk_steps <- steps(trk_hourly)
+```
+
+
+
+
+I want to see what this looks like
+
+```{r}
+library(leaflet)
+d <- as.data.frame(trk_hourly)
+
+track_sf <- st_as_sf(
+d,
+coords = c("x_", "y_"),
+crs = 4326,
+remove = FALSE
+)
+
+line_sf <- st_cast(
+st_combine(track_sf),
+"LINESTRING"
+)
+
+leaflet() %>%
+addProviderTiles("OpenStreetMap") %>%
+addPolylines(
+data = line_sf,
+color = "blue",
+weight = 3
+) %>%
+addCircleMarkers(
+data = track_sf,
+radius = 4,
+color = "black",
+fillColor = "red",
+fillOpacity = 0.8,
+popup = ~paste(
+"Time:", t_,
+"
+Longitude:", round(x_, 5),
+"
+Latitude:", round(y_, 5)
+)
+)
+```
+
+```{r}
+
+library(dplyr)
+library(tibble)
+library(amt)
+
+trk_hourly2 <- track_resample(
+trk,
+rate = hours(2),
+tolerance = minutes(10)
+)
+
+trk_steps2 <- steps(trk_hourly2)
+```
+
+
+```{r}
+library(leaflet)
+d <- as.data.frame(trk_hourly2)
+
+track_sf <- st_as_sf(
+d,
+coords = c("x_", "y_"),
+crs = 4326,
+remove = FALSE
+)
+
+line_sf <- st_cast(
+st_combine(track_sf),
+"LINESTRING"
+)
+
+leaflet() %>%
+addProviderTiles("OpenStreetMap") %>%
+addPolylines(
+data = line_sf,
+color = "blue",
+weight = 3
+) %>%
+addCircleMarkers(
+data = track_sf,
+radius = 4,
+color = "black",
+fillColor = "red",
+fillOpacity = 0.8,
+popup = ~paste(
+"Time:", t_,
+"
+Longitude:", round(x_, 5),
+"
+Latitude:", round(y_, 5)
+)
+)
+```
+
+
+
+
+I want to check the second part of the loop
+
+```{r}
+gps_sub2 <- gps |>
+  filter(timestamp >= as.POSIXct("2026-08-01 18:00:00", tz = "UTC"),
+         timestamp <  as.POSIXct("2026-08-03 20:00:00", tz = "UTC"))
+```
+
+```{r}
+gps_clean2 <- gps_sub2 %>%
+  mutate(
+    timestamp = as.POSIXct(timestamp, tz = "UTC"),
+    longitude = as.numeric(Longitude),
+    latitude = as.numeric(Latitude)
+  ) %>%
+  filter(
+    !is.na(track_id),
+    !is.na(timestamp),
+    !is.na(longitude),
+    !is.na(latitude),
+    between(longitude, -180, 180),
+    between(latitude, -90, 90)
+  ) %>%
+  arrange(track_id, timestamp) %>%
+  distinct(track_id, timestamp, .keep_all = TRUE)
+```
+
+```{r}
+library(amt)
+trk2 <- make_track(
+  gps_clean2,
+  .x = longitude,
+  .y = latitude,
+  .t = timestamp,
+  id = id,
+  crs = 4326,
+  all_cols = TRUE,
+  check_duplicates = TRUE
+)
+```
+
+Then to see sampling rate:
+```{r}
+amt::summarize_sampling_rate(trk2)
+```
+
+```{r}
+library(dplyr)
+library(tibble)
+library(amt)
+
+trk_hourly <- track_resample(
+trk2,
+rate = hours(1),
+tolerance = minutes(10)
+)
+
+trk_steps <- steps(trk_hourly)
+```
+
+```{r}
+library(leaflet)
+d <- as.data.frame(trk_hourly)
+
+track_sf <- st_as_sf(
+d,
+coords = c("x_", "y_"),
+crs = 4326,
+remove = FALSE
+)
+
+line_sf <- st_cast(
+st_combine(track_sf),
+"LINESTRING"
+)
+
+leaflet() %>%
+addProviderTiles("OpenStreetMap") %>%
+addPolylines(
+data = line_sf,
+color = "blue",
+weight = 3
+) %>%
+addCircleMarkers(
+data = track_sf,
+radius = 4,
+color = "black",
+fillColor = "red",
+fillOpacity = 0.8,
+popup = ~paste(
+"Time:", t_,
+"
+Longitude:", round(x_, 5),
+"
+Latitude:", round(y_, 5)
+)
+)
+```
+
+
+I will try again with this interpolated 
+i have also inserted a 15 minute tolerance so that i dont get an interpolated point right
+next to a
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+library(lubridate)
+library(amt)
+
+d <- as.data.frame(trk_hourly) %>%
+  arrange(t_)
+
+# Set to Inf to interpolate across all gaps.
+# A finite value is safer because long gaps may create unrealistic tracks.
+max_gap_hours <- Inf
+
+pieces <- map(seq_len(nrow(d) - 1), function(i) {
+
+  p1 <- d[i, ]
+  p2 <- d[i + 1, ]
+
+  gap_hours <- as.numeric(
+    difftime(p2$t_, p1$t_, units = "hours")
+  )
+
+  observed_start <- tibble(
+    t_ = p1$t_,
+    x_ = p1$x_,
+    y_ = p1$y_,
+    interpolated = FALSE
+  )
+
+  if (gap_hours <= 1 || gap_hours > max_gap_hours) {
+    return(observed_start)
+  }
+
+  insert_tolerance <- minutes(15)
+
+new_times <- seq(
+  from = p1$t_ + hours(1),
+  to = p2$t_ - seconds(1),
+  by = "1 hour"
+)
+
+# Remove candidate times too close to either observed fix
+new_times <- new_times[
+  difftime(new_times, p1$t_, units = "mins") >=
+    as.numeric(insert_tolerance, units = "mins") &
+  difftime(p2$t_, new_times, units = "mins") >=
+    as.numeric(insert_tolerance, units = "mins")
+]
+
+  fraction <- as.numeric(
+    difftime(new_times, p1$t_, units = "secs")
+  ) / as.numeric(
+    difftime(p2$t_, p1$t_, units = "secs")
+  )
+
+  interpolated <- tibble(
+    t_ = new_times,
+    x_ = p1$x_ + fraction * (p2$x_ - p1$x_),
+    y_ = p1$y_ + fraction * (p2$y_ - p1$y_),
+    interpolated = TRUE
+  )
+
+  bind_rows(observed_start, interpolated)
+})
+
+# Add the final observed fix
+d_interp <- bind_rows(
+  pieces,
+  tibble(
+    t_ = d$t_[nrow(d)],
+    x_ = d$x_[nrow(d)],
+    y_ = d$y_[nrow(d)],
+    interpolated = FALSE
+  )
+) %>%
+  arrange(t_)
+
+# Convert back to an amt track
+trk_interp <- make_track(
+  d_interp,
+  .x = x_,
+  .y = y_,
+  .t = t_,
+  crs = 4326,
+  all_cols = TRUE
+)
+```
+```{r}
+table(d_interp$interpolated)
+```
+
+```{r}
+library(sf)
+library(leaflet)
+
+d <- as.data.frame(trk_interp)
+
+track_sf <- st_as_sf(
+  d,
+  coords = c("x_", "y_"),
+  crs = 4326,
+  remove = FALSE
+)
+
+line_sf <- st_cast(
+  st_combine(track_sf),
+  "LINESTRING"
+)
+
+leaflet() %>%
+  addProviderTiles("OpenStreetMap") %>%
+  addPolylines(
+    data = line_sf,
+    color = "blue",
+    weight = 3
+  ) %>%
+  addCircleMarkers(
+    data = track_sf,
+    radius = 4,
+    color = ~ifelse(interpolated, "orange", "black"),
+    fillColor = ~ifelse(interpolated, "orange", "red"),
+    fillOpacity = 0.8,
+    popup = ~paste(
+      "Time:", t_,
+      "<br>Longitude:", round(x_, 5),
+      "<br>Latitude:", round(y_, 5),
+      "<br>Fix:", ifelse(interpolated, "Interpolated", "Observed")
+    )
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("red", "orange"),
+    labels = c("Observed fix", "Interpolated fix"),
+    title = "GPS positions"
+  )
+```
+
+How do I then determine the altitude
+What is the overall altitude:
+
+```{r}
+hist(trk2$Altitude)
+summary(trk2$Altitude)
+```
+
+```{r}
+plot(trk2$t_, trk2$Altitude)
+plot(trk2$Speed, trk2$Altitude)
+```
+
+Can I filter my weather data for the 700 Pa level
+
+```{r}
+library(tidync)
+library(dplyr)
+
+f <- "/Volumes/Untitled/era5_2026_08_01-03.nc"
+
+tidync(f)   # check the level dimension name first
+```
+To ghet the u and v components of the wind data at 750 level 
+```{r}
+wind750 <- tidync(f) |>
+  hyper_filter(isobaricInhPa = isobaricInhPa == 750) |>
+  activate("u") |>
+  hyper_tibble() |>
+  left_join(
+    tidync(f) |>
+      hyper_filter(isobaricInhPa = isobaricInhPa == 750) |>
+      activate("v") |>
+      hyper_tibble(),
+    by = c("longitude", "latitude", "isobaricInhPa", "time")
+  )
+```
+
+Sanity check
+
+```{r}
+head(wind750)
+summary(wind750$u)   # typical values: roughly -30 to +30 m/s
+range(wind750$time)  # should be 12-14 July 2026
+```
+
+Following: Brønnvik, H. et al., 2022
+
+```{r}
+# set criteria for tracks
+stepNumber <- 19 # random steps. The number of steps used is arbitrary. The goal is to use
+
+# enough to capture the actual distribution of available environmental conditions without
+# running out of computational ability.
+toleranceLength <- 15 # tolerance in minutes. We use 15 minutes because some of our steps
+# are only 1 hour apart and we need to keep the timing precise.
+```
+
+Filtering for steps with less than 3 bursts:
+
+```{r}
+library(dplyr)
+library(amt)
+
+d <- as.data.frame(trk_interp) %>%
+  arrange(t_) %>%
+  mutate(burst_ = 1L)
+
+trk_bursted <- make_track(
+  d,
+  .x = x_,
+  .y = y_,
+  .t = t_,
+  burst_ = burst_,
+  crs = 4326,
+  all_cols = TRUE
+)
+
+trk_clean <- filter_min_n_burst(
+  trk_bursted,
+  3
+)
+
+burst <- steps_by_burst(
+  trk_clean,
+  keep_cols = "start"
+)
+
+rnd_stps <- burst |>
+  random_steps(n_control = stepNumber,
+               sl_distr = sl_all,
+               ta_distr = ta_all)
+```
+
+```{r}
+library(dplyr); library(ggplot2); library(patchwork)
+
+plot_dat <- as.data.frame(rnd_stps) |>
+  mutate(type = factor(if_else(case_, "Observed", "Available"),
+                       levels = c("Observed", "Available")))
+cols <- c(Observed = "steelblue", Available = "orange")
+
+p_sl <- plot_dat |>
+  filter(is.finite(sl_)) |>
+  ggplot(aes(sl_ / 1000, fill = type)) +          # metres -> km
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = cols, name = NULL) +
+  labs(title = "Step lengths", x = "Step length (km)", y = "Density") +
+  theme_minimal()
+
+p_ta <- plot_dat |>
+  filter(is.finite(ta_)) |>
+  ggplot(aes(ta_, fill = type)) +
+  geom_density(alpha = 0.5) +
+  scale_x_continuous(limits = c(-pi, pi),
+                     breaks = c(-pi, -pi/2, 0, pi/2, pi),
+                     labels = c("-π", "-π/2", "0", "π/2", "π")) +
+  scale_fill_manual(values = cols, name = NULL) +
+  labs(title = "Turning angles", x = "Turning angle (radians)", y = "Density") +
+  theme_minimal()
+
+p_sl / p_ta + plot_layout(guides = "collect")
+```
+
+This does show that there is a strong bias in the direction - does this need to be accounted for 
+in my distribution? 
+
+
+selecting just the u and v components
+```{r}
+wind750 <- tidync(f) |>
+  hyper_filter(isobaricInhPa = isobaricInhPa == 750) |>
+  hyper_tibble(select_var = c("u", "v"))
+```
+
+Turning my long table (one row per time × longitude × latitude, with u and v columns) into a stack of rasters, one layer per time step, and attaches a timestamp to each layer.
+```{r}
+
+wind750 <- tidync(f) |>
+  hyper_filter(isobaricInhPa = isobaricInhPa == 750) |>
+  hyper_tibble(select_var = c("u", "v"), force = TRUE)
+
+head(unique(wind750$time), 10)   # check this first: 72 distinct values?
+wind750 <- wind750 |>
+  mutate(time = ymd_hms(time, tz = "UTC"))
+
+length(unique(wind750$time))   # should be 72
+head(unique(wind750$time), 5)  # should show hours
+
+
+make_stack <- function(dat, var) {
+  tms <- sort(unique(dat$time))
+  lst <- dat |>
+    select(time, longitude, latitude, all_of(var)) |>
+    group_split(time)                       # ordered by time
+  r <- rast(lapply(lst, \(d) rast(d[, c("longitude", "latitude", var)],
+                                  type = "xyz", crs = "EPSG:4326")))
+  time(r) <- tms
+  r
+}
+
+u_r <- make_stack(wind750, "u")
+v_r <- make_stack(wind750, "v")
+
+nlyr(u_r)                       # 72
+diff(time(u_r))[1:3]       
+```
+
+Extracting the data i want 
+
+```{r}
+ssf_dat <- rnd_stps |>
+  extract_covariates_var_time(
+    u_r,
+    when = "any",
+    max_time = lubridate::hours(1),
+    name_covar = "u",
+    where = "end"
+  ) |>
+  extract_covariates_var_time(
+    v_r,
+    when = "any",
+    max_time = lubridate::hours(1),
+    name_covar = "v",
+    where = "end"
+  ) |>
+  mutate(
+    bearing = geosphere::bearing(
+      cbind(x1_, y1_),
+      cbind(x2_, y2_)
+    ) * pi / 180,
+
+    tailwind = u * sin(bearing) + v * cos(bearing),
+    crosswind = u * cos(bearing) - v * sin(bearing),
+    abs_cross = abs(crosswind),
+    wind_speed = sqrt(u^2 + v^2)
+  )
+
+```
+Sanity check 
+```{r}
+summary(ssf_dat[c("u", "v", "bearing",
+                  "tailwind", "crosswind",
+                  "abs_cross", "wind_speed")])
+
+colSums(is.na(ssf_dat[c("u", "v", "bearing",
+                        "tailwind", "crosswind")]))
+```
+
+Then to fit the model
+
+```{r}
+model_dat <- ssf_dat |>
+  dplyr::select(case_, tailwind, abs_cross) |>
+  dplyr::mutate(
+    case_ = as.numeric(case_),
+    tailwind_s = as.numeric(tailwind),
+    cross_s = as.numeric(abs_cross)
+  )
+
+summary(model_dat)
+colSums(is.na(model_dat))
+sum(complete.cases(model_dat))
+```
+We then fit the SSF model.
+This is a step-selection function fitted with conditional logistic regression. It compares each observed step (case_ = 1) with its available/random alternatives (case_ = 0) within the same step_id_ stratum.
+```{r}
+library(survival)
+
+m <- ssf_dat |>
+  mutate(log_sl_ = log(sl_), cos_ta_ = cos(ta_),
+         tailwind_s = scale(tailwind)[, 1],
+         cross_s    = scale(abs_cross)[, 1]) |>
+  fit_clogit(case_ ~ tailwind_s + cross_s +
+               sl_ + log_sl_ + cos_ta_ + strata(step_id_))
+summary(m)
+```
+What each term does
+
+sl_ (step length). The linear step-length term. Its coefficient adjusts the rate parameter of the gamma distribution. A negative coefficient means shorter steps are favored relative to what the random steps assumed, and a positive one means longer steps are.
+
+log_sl_ (log of step length). Its coefficient adjusts the shape parameter of the gamma distribution. Together with sl_, it lets the model correct the whole step-length distribution rather than only its mean. Both are needed because the gamma density involves both sl_ and log(sl_).
+
+cos_ta_ (cosine of the turning angle). This adjusts the concentration of the von Mises distribution, meaning how strongly the bird keeps going straight. A positive coefficient means straighter movement than assumed, and a negative one means more turning or reversals. The cosine is used because it peaks at 0 (straight ahead) and is lowest at π (reversal), and because the von Mises density is built from it.
+
+
+
+Trying to slim the model down 
+
+```{r}
+library(amt); library(dplyr); library(survival)
+
+dat <- ssf_dat |>
+  mutate(log_sl_    = log(sl_),
+         cos_ta_    = cos(ta_),
+         tailwind_s = as.numeric(scale(tailwind)),
+         cross_s    = as.numeric(scale(abs_cross)))
+
+# slim model: wind covariates only
+m_slim <- fit_clogit(dat, case_ ~ tailwind_s + cross_s + strata(step_id_))
+summary(m_slim)
+
+# full model (movement terms included), for comparison
+m_full <- fit_clogit(dat, case_ ~ tailwind_s + cross_s +
+                       sl_ + log_sl_ + cos_ta_ + strata(step_id_))
+
+summary(m_full)
+```
+The wind coefficients are essentially identical in both models, so the movement terms (sl_, log_sl_, cos_ta_) aren’t driving anything. The full model’s likelihood ratio test is only 0.06 higher than the slim one’s, for 3 extra parameters (p ≈ 0.99), so those terms add nothing. Use the slim model.
+
+
+```{r}
+dat |>
+  group_by(step_id_) |>
+  summarise(sd_tail = sd(tailwind), sd_cross = sd(abs_cross)) |>
+  summarise(across(everything(), median))
+```
+
+```{r}
+sd(dat$tailwind); sd(dat$abs_cross)
+
+# share of total variance that lies within strata
+dat |>
+  group_by(step_id_) |>
+  mutate(tail_c = tailwind - mean(tailwind),
+         cross_c = abs_cross - mean(abs_cross)) |>
+  ungroup() |>
+  summarise(within_tail  = var(tail_c)  / var(tailwind),
+            within_cross = var(cross_c) / var(abs_cross))
+```
+I want to see if my observed data varies enough compared to my available data to see if the model even has an option to select for anything
+
+
+```{r}
+ dat |>
+  group_by(step_id_) |>
+  mutate(tail_diff  = tailwind  - mean(tailwind[!case_]),
+         cross_diff = abs_cross - mean(abs_cross[!case_])) |>
+  ungroup() |>
+  filter(case_) |>
+  summarise(across(c(tail_diff, cross_diff),
+                   list(mean = mean, sd = sd, se = ~sd(.x) / sqrt(n()))))
+```
+
+```{r}
+library(ggplot2)
+ggplot(dat, aes(x = tailwind, fill = case_)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c(`TRUE` = "steelblue", `FALSE` = "orange"),
+                    labels = c("Available", "Observed"), name = NULL) +
+  theme_minimal()
+```
+```{r}
+library(ggplot2)
+ggplot(dat, aes(x = crosswind, fill = case_)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c(`TRUE` = "steelblue", `FALSE` = "orange"),
+                    labels = c("Available", "Observed"), name = NULL) +
+  theme_minimal()
+```
+
+I dont think there is enough variance between my two options. But this could be mainly based on the fact that i havent used my whole track for my distribution 
+
+Trying another model:
+Does tailwind effect step length, or is tail wind selected for in larger steps 
+```{r}
+m_int <- fit_clogit(dat, case_ ~ tailwind_s + cross_s + sl_ + log_sl_ + cos_ta_ +
+             tailwind_s:sl_ + strata(step_id_))
+summary(m_int)
+```
+
+
